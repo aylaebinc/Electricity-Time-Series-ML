@@ -1,0 +1,324 @@
+---
+title: "ML-Electricity Consumption"
+output: github_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F)
+library(dplyr)
+library(ggplot2)
+```
+
+```{r}
+train = read.csv("D:/datasets/Analytics Vidhya/train.csv", na.strings = '')
+test = read.csv("D:/datasets/Analytics Vidhya/test.csv", na.strings = '')
+
+full = bind_rows(train,test)
+colSums(is.na(full))
+target = train$electricity_consumption
+```
+
+#Data Exploration
+```{r}
+full$datetime = as.POSIXct(full$datetime, format = '%Y-%m-%d %H:%M:%S')
+
+ggplot(full[1:nrow(train),]) + geom_line(aes(x = datetime, y = electricity_consumption))
+
+
+full$year = format(full$datetime, '%Y')
+full$month = format(full$datetime, '%m')
+full$day = format(full$datetime,'%d')
+full$hour = format(full$datetime,'%H')
+library(lubridate)
+full$weekday = wday(full$datetime)
+
+year_wise = full %>% group_by(year) %>% summarise(avg_consumption = mean(electricity_consumption, na.rm = T))
+
+month_wise = full %>% group_by(month) %>% summarise(avg_consumption = mean(electricity_consumption, na.rm = T))
+
+day_wise = full %>% group_by(day) %>% summarise(avg_consumption = mean(electricity_consumption, na.rm = T))
+
+hour_wise = full %>% group_by(hour) %>% summarise(avg_consumption = mean(electricity_consumption, na.rm = T))
+
+weekday_wise = full %>% group_by(weekday) %>% summarise(avg_consumption = mean(electricity_consumption, na.rm = T))
+
+ggplot(full[1:nrow(train),]) + geom_line(aes(x = datetime, y = electricity_consumption)) + facet_wrap(~year)
+
+ggplot(year_wise) + geom_bar(aes(x = year, y = avg_consumption, fill = -avg_consumption),stat = 'identity')
+
+ggplot(month_wise) + geom_bar(aes(x = month, y = avg_consumption, fill = -avg_consumption),stat = 'identity')
+
+ggplot(day_wise) + geom_bar(aes(x = day, y = avg_consumption, fill = -avg_consumption),stat = 'identity')
+
+ggplot(hour_wise) + geom_bar(aes(x = hour, y = avg_consumption, fill = -avg_consumption),stat = 'identity')
+
+ggplot(full) + geom_bar(aes(x = hour, y = electricity_consumption, fill = electricity_consumption), stat = 'identity') + facet_wrap(~month)
+
+ggplot(weekday_wise) + geom_bar(aes(x = weekday, y = avg_consumption, fill = -avg_consumption),stat = 'identity')
+
+
+library(e1071)
+hist(sqrt(train$electricity_consumption))
+skewness(train$electricity_consumption)
+skewness(log(train$electricity_consumption))
+skewness(sqrt(train$electricity_consumption))
+
+boxplot(train$electricity_consumption)
+quantile(train$electricity_consumption)
+range(train$electricity_consumption)
+#full$outliers = NULL
+#full$outliers = ifelse(full$electricity_consumption>350,1,0)
+#full$outliers = factor(full$outliers,ordered = T)
+```
+
+#Data Massaging
+```{r}
+#full = full[-c(8)]
+full = full[-c(1,2)]
+full$year = factor(full$year)
+full$month = factor(full$month)
+full$day = factor(full$day)
+full$hour = factor(full$hour)
+full$weekday = factor(full$weekday)
+str(full)
+
+```
+
+
+#Feature Engineering
+```{r}
+library(xgboost)
+#one hot encoding
+options(na.action = 'na.pass')
+library(data.table)
+library(Matrix)
+#We make a column outlier where the electricity consumption is too high and feed that as a variable to the final model.
+full1 = full
+full1$outlier = ifelse(full1$electricity_consumption>350,1,0)
+full1$electricity_consumption = NULL
+train2 = full1[1:nrow(train),]
+test2 = full1[(nrow(train)+1):nrow(full),]
+
+
+sparse_matrix_full1 = sparse.model.matrix(outlier~.-1, data = full1)
+sparse_train1 = sparse_matrix_full1[1:nrow(train),]
+sparse_test1 = sparse_matrix_full1[(nrow(train)+1):nrow(full1),]
+
+
+
+#Model fitting - xgboost CV
+output_vector = train2[,"outlier"] == "1"
+
+dtrain1 = xgb.DMatrix(sparse_train1, label =output_vector)
+dtest1 = xgb.DMatrix(sparse_test1)
+params <- list(booster = "gbtree", objective = "binary:logistic", eta=0.05, gamma=5, max_depth=10, min_child_weight=1, subsample=0.8, colsample_bytree=0.8, eval_metric = 'error')
+
+xgbcv1 <- xgb.cv( params = params, data = dtrain1, nrounds = 1000, nfold = 5, showsd = T, stratified = T, maximize = F)
+
+mean(xgbcv1$evaluation_log)
+which.min(xgbcv1$evaluation_log)
+
+
+xgb2 <- xgb.train(params = params, data = dtrain1, nrounds = 500,verbose = 1,maximize = F)
+
+mat = xgb.importance(model = xgb2, feature_names = colnames(train2))
+xgb.plot.importance(importance_matrix = mat[1:10])
+pred10 <- predict(xgb2,dtest1, type = 'class')
+pred10 = ifelse(pred10<0.5,0,1)
+test2$outlier = pred10
+train2$electricity_consumption = train$electricity_consumption
+full2 = bind_rows(train2,test2) 
+full2$outlier = factor(full2$outlier, ordered = T)
+```
+
+
+
+
+#Model Fitting - XGBoost
+
+```{r}
+library(xgboost)
+#one hot encoding
+options(na.action = 'na.pass')
+library(data.table)
+library(Matrix)
+
+
+sparse_matrix_full = sparse.model.matrix(electricity_consumption~.-1, data = full2)
+sparse_train = sparse_matrix_full[1:nrow(train),]
+sparse_test = sparse_matrix_full[(nrow(train)+1):nrow(full),]
+# target variable should be in numeric
+
+
+#Model fitting - xgboost CV
+
+dtrain = xgb.DMatrix(sparse_train, label = target)
+dtest = xgb.DMatrix(sparse_test)
+params <- list(booster = "gbtree", objective = "reg:linear", eta=0.1, gamma=0, max_depth=6, min_child_weight=1, subsample=0.8, colsample_bytree=0.8, eval_metric = 'rmse')
+
+#params <- list(booster = "gblinear", objective = "reg:linear", eta=0.05, gamma=5, subsample=0.8, colsample_bytree=0.8, eval_metric = 'rmse', lambda = 1)
+
+xgbcv <- xgb.cv( params = params, data = dtrain, nrounds = 500, nfold = 5, showsd = T, stratified = T, maximize = F)
+
+mean(xgbcv$evaluation_log$test_rmse_mean)
+which.min(xgbcv$evaluation_log$test_rmse_mean)
+#nrounds = 909
+
+xgb1 <- xgb.train(params = params, data = dtrain, nrounds = 500,verbose = 1,maximize = F)
+pred10 <- predict(xgb1,dtest)
+mat = xgb.importance(model = xgb1, feature_names = colnames(full2))
+xgb.plot.importance(importance_matrix = mat[1:13])
+
+```
+
+#Deep Learning
+```{r}
+train2 = full2[1:nrow(train),]
+train2$year = factor(train2$year, ordered = F)
+train2$month = factor(train2$month,ordered = F)
+train2$day = NULL
+train2$weekday = factor(train2$weekday,ordered = F)
+train2$hour = factor(train2$hour,ordered = F)
+train2$outlier = factor(train2$outlier,ordered = F)
+
+test2$year = factor(test2$year, ordered = F)
+test2$month = factor(test2$month,ordered = F)
+test2$day =NULL
+test2$weekday = factor(test2$weekday,ordered = F)
+test2$hour = factor(test2$hour,ordered = F)
+test2$outlier = factor(test2$outlier,ordered = F)
+
+library(h2o)
+h2o.init(nthreads = -1)
+model = h2o.deeplearning(y = 'electricity_consumption',
+                         training_frame = as.h2o(train2),
+                         activation = 'Rectifier',
+                         hidden = c(1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000),
+                         epochs = 100,
+                         train_samples_per_iteration = -1)
+
+y_pred = h2o.predict(model, newdata = as.h2o(test2))
+
+```
+
+
+
+# h2o advanced
+# stacked ensemble
+
+```{r}
+library(tidyquant)
+library(h2o)
+library(dplyr)
+full = full[-c(1)]
+full = full %>% tk_augment_timeseries_signature()
+full = full[-c(1)]
+full = full %>% mutate_if(is.ordered,~ as.character(.) %>% as.factor)
+h2o.init(nthreads = -1)
+train = full[1:nrow(train),]
+test = full[(nrow(train) +1):nrow(full),]
+train_h2o = as.h2o(train)
+test_h2o = as.h2o(test)
+
+y = "electricity_consumption"
+x = setdiff(names(train_h2o), y)
+
+model = h2o.automl(x = x,
+                   y = y,
+                   training_frame = train_h2o,
+                   stopping_metric = 'RMSE',
+                   max_runtime_secs = 60)
+
+#extract leader model 
+automl_leader = model@leader
+
+#predict
+pred = h2o.predict(automl_leader , newdata = test_h2o)
+pred = as.vector(pred)
+#### Stacked ensemble
+# Train & Cross-validate a GBM
+my_gbm <- h2o.gbm(x = x,
+                  y = y,
+                  training_frame = train_h2o,
+                  distribution = "gaussian",
+                  max_depth = 6,
+                  min_rows = 2,
+                  learn_rate = 0.1,
+                  nfolds = 5,
+                  fold_assignment = "AUTO",
+                  keep_cross_validation_predictions = TRUE)
+
+# Train & Cross-validate a RF
+my_rf <- h2o.randomForest(x = x,
+                          y = y,
+                          training_frame = train_h2o,
+                          nfolds = 5,
+                          fold_assignment = "AUTO",
+                          keep_cross_validation_predictions = TRUE)
+
+# Train & Cross-validate a DNN
+my_dl <- h2o.deeplearning(x = x,
+                          y = y,
+                          training_frame = train_h2o,
+                          l1 = 0.001,
+                          l2 = 0.001,
+                          hidden = c(200, 200, 200),
+                          nfolds = 5,
+                          fold_assignment = "AUTO",
+                          keep_cross_validation_predictions = TRUE)
+
+# Train & Cross-validate a (shallow) XGB-GBM
+my_xgb1 <- h2o.xgboost(x = x,
+                       y = y,
+                       training_frame = train_h2o,
+                       distribution = "gaussian",
+                       ntrees = 100,
+                       max_depth = 3,
+                       min_rows = 2,
+                       learn_rate = 0.1,
+                       nfolds = 5,
+                       fold_assignment = "AUTO",
+                       keep_cross_validation_predictions = TRUE)
+
+
+# Train & Cross-validate another (deeper) XGB-GBM
+my_xgb2 <- h2o.xgboost(x = x,
+                       y = y,
+                       training_frame = train,
+                       distribution = "gaussian",
+                       ntrees = 100,
+                       max_depth = 8,
+                       min_rows = 1,
+                       learn_rate = 0.1,
+                       sample_rate = 0.7,
+                       col_sample_rate = 0.9,
+                       nfolds = 5,
+                       fold_assignment = "AUTO",
+                       keep_cross_validation_predictions = TRUE)
+
+
+# Train a stacked ensemble using the H2O and XGBoost models from above
+base_models <- list(my_gbm@model_id, my_rf@model_id, my_dl@model_id,  
+                    my_xgb1@model_id, my_xgb2@model_id)
+
+ensemble <- h2o.stackedEnsemble(x = x,
+                                y = y,
+                                training_frame = train,
+                                base_models = base_models)
+
+# Eval ensemble performance on a test set
+perf <- h2o.performance(ensemble, newdata = test)
+
+
+# Compare to base learner performance on the test set
+get_auc <- function(mm) h2o.auc(h2o.performance(h2o.getModel(mm), newdata = test))
+baselearner_aucs <- sapply(base_models, get_auc)
+baselearner_best_auc_test <- max(baselearner_aucs)
+ensemble_auc_test <- h2o.auc(perf)
+#Compare the test set performance of the best base model to the ensemble.
+
+print(sprintf("Best Base-learner Test AUC:  %s", baselearner_best_auc_test))
+print(sprintf("Ensemble Test AUC:  %s", ensemble_auc_test))
+```
+
